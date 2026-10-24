@@ -6,7 +6,7 @@
 //! Algorithme : moyenne par aires (`thumbnails::resize_area`), le filtre idéal pour une réduction : rapide (séparable, deux passes),
 //! sans halo ni moiré. Les JPEG sont de plus décodés à échelle réduite (DCT 1/2, 1/4, 1/8) quand la cible est nettement plus petite
 //! que l'original, ce qui évite de décoder une photo de 24 Mpx en pleine résolution. L'image n'est jamais agrandie.
-//! Sources gérées : JPEG, PNG et RAW (aperçu JPEG intégré, comme pour les miniatures).
+//! Sources gérées : JPEG, PNG, RAW (aperçu JPEG intégré, comme pour les miniatures) et HEIC / HEIF (décodage heic-rs).
 
 use std::borrow::Cow;
 use std::fs;
@@ -233,16 +233,25 @@ fn render(source: &Path, options: &ResizeOptions) -> Result<(Vec<u8>, usize, usi
     let is_png = data.starts_with(&[0x89, b'P', b'N', b'G']);
     let is_jpeg = data.starts_with(&[0xff, 0xd8]);
     // `original` : dimensions du fichier source (un JPEG peut être décodé à échelle réduite, la cible se calcule sur l'original).
-    let (raster, original, metadata, orientation) = if is_png {
+    // `orientation` : rotation à appliquer aux pixels ; `exif_orientation` : valeur à remettre à 1 dans l'EXIF recopié (différente pour le HEIC,
+    // dont le décodeur a déjà appliqué la rotation du conteneur alors que l'EXIF garde l'orientation d'origine).
+    let (raster, original, metadata, orientation, exif_orientation) = if is_png {
         let (raster, icc) = decode_png(&data)?;
         let original = (raster.width, raster.height);
-        (raster, original, SourceMetadata { icc, ..SourceMetadata::default() }, 1)
+        (raster, original, SourceMetadata { icc, ..SourceMetadata::default() }, 1, 1)
+    } else if crate::heif::is_heif_path(source) {
+        let decoded = crate::heif::decode(source)?;
+        let original = (decoded.width, decoded.height);
+        let xmp = crate::heif::read_xmp(source).map(|packet| [XMP_HEADER, packet.as_bytes()].concat());
+        let metadata = SourceMetadata { exif: crate::heif::exif_app1_payload(source), xmp, iptc: None, icc: decoded.icc };
+        (Raster { rgb: decoded.rgb, alpha: None, width: decoded.width, height: decoded.height }, original, metadata, 1, thumbnails::read_orientation(source))
     } else if is_jpeg || is_raw_extension(&extension) {
         let jpeg = if is_jpeg { Cow::Borrowed(data.as_slice()) } else { Cow::Owned(thumbnails::extract_raw_preview(source)?) };
         let (raster, original) = decode_jpeg(&jpeg, options)?;
-        (raster, original, read_jpeg_metadata(&jpeg), thumbnails::read_orientation(source))
+        let orientation = thumbnails::read_orientation(source);
+        (raster, original, read_jpeg_metadata(&jpeg), orientation, orientation)
     } else {
-        return Err("Format source non pris en charge pour le redimensionnement (JPEG, PNG et RAW uniquement)".into());
+        return Err("Format source non pris en charge pour le redimensionnement (JPEG, PNG, RAW et HEIC / HEIF uniquement)".into());
     };
 
     // Réduction (dans l'orientation stockée), puis orientation EXIF appliquée aux pixels : la photo s'affiche correctement
@@ -253,7 +262,7 @@ fn render(source: &Path, options: &ResizeOptions) -> Result<(Vec<u8>, usize, usi
     let (width, height) = (raster.width, raster.height);
 
     let bytes = match options.format {
-        OutputFormat::Jpeg => encode_jpeg(&raster, options, &metadata, orientation)?,
+        OutputFormat::Jpeg => encode_jpeg(&raster, options, &metadata, exif_orientation)?,
         OutputFormat::Png => encode_png(&raster, options, metadata.icc.as_deref())?,
     };
     Ok((bytes, width, height))

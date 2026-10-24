@@ -2,6 +2,7 @@
 
 mod db;
 mod exif;
+mod heif;
 mod library_sync;
 mod resize;
 mod thumbnails;
@@ -326,7 +327,7 @@ struct GeneratedThumbnail {
     height: u32,
 }
 
-// Génère la miniature (JPEG uniquement) directement dans le cache, hors du webview : décodage réduit,
+// Génère la miniature (JPEG, RAW via son aperçu intégré, et HEIC / HEIF) directement dans le cache, hors du webview : décodage réduit,
 // orientation EXIF appliquée, taille réelle renvoyée (ratio exact pour la disposition justifiée).
 // Une erreur (PNG, JPEG CMYK, fichier illisible…) indique à l'interface d'utiliser sa génération de repli.
 #[tauri::command(async)]
@@ -362,7 +363,12 @@ fn get_raw_preview_path(state: State<'_, AppState>, source_path: String) -> Resu
     if preview_path.is_file() {
         return Ok(preview_path.to_string_lossy().into_owned());
     }
-    let jpeg_bytes = thumbnails::extract_raw_preview(Path::new(&source_path))?;
+    let jpeg_bytes = if heif::is_heif_path(Path::new(&source_path)) {
+        // HEIC / HEIF : le webview ne sait pas les lire, on affiche un JPEG pleine résolution décodé en Rust (mis en cache comme les aperçus RAW).
+        heif::preview_jpeg(Path::new(&source_path))?
+    } else {
+        thumbnails::extract_raw_preview(Path::new(&source_path))?
+    };
     let parent = preview_path.parent().ok_or("Dossier de cache invalide")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let temp = parent.join(format!("prev-{}-{}.tmp", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()));

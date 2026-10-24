@@ -33,7 +33,9 @@ pub struct ThumbnailSize {
 pub fn generate_thumbnail(source: &Path, destination: &Path, max_side: usize) -> Result<ThumbnailSize, String> {
     let (rgb, width, height) = decode_scaled_rgb(source, max_side)?;
     let (rgb, width, height) = resize_to_fit(rgb, width, height, max_side);
-    let (rgb, width, height) = apply_orientation(rgb, width, height, read_orientation(source));
+    // HEIC / HEIF : le décodeur a déjà appliqué la rotation du conteneur, l'orientation EXIF ne doit pas l'être une seconde fois.
+    let orientation = if crate::heif::is_heif_path(source) { 1 } else { read_orientation(source) };
+    let (rgb, width, height) = apply_orientation(rgb, width, height, orientation);
     write_jpeg(destination, &rgb, width, height)?;
     Ok(ThumbnailSize { width: width as u32, height: height as u32 })
 }
@@ -208,6 +210,12 @@ fn decode_scaled_rgb(source: &Path, max_side: usize) -> Result<(Vec<u8>, usize, 
     if is_raw {
         let jpeg_bytes = extract_raw_preview(source)?;
         return decode_scaled_jpeg_reader(Cursor::new(jpeg_bytes), max_side);
+    }
+
+    // HEIC / HEIF : décodage complet en Rust pur (crate heic-rs), pas de réduction DCT possible comme pour le JPEG
+    if crate::heif::is_heif_path(source) {
+        let decoded = crate::heif::decode(source)?;
+        return Ok((decoded.rgb, decoded.width, decoded.height));
     }
 
     // Sinon décodage JPEG standard direct depuis le fichier

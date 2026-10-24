@@ -35,3 +35,6 @@ clipboard-rs = { version = "0.3", default-features = false }
 # Suppression des photos vers la corbeille de l'OS (commande delete_photos) : Windows (API Windows via la crate `windows`, aucune DLL à distribuer),
 # macOS et Linux (corbeille freedesktop).
 trash = "5"
+# Décodage des photos HEIC / HEIF (miniatures, plein écran, redimensionnement) : décodeur HEVC en Rust pur (MIT OR Apache-2.0), sans DLL ni outil de build natif.
+# La crate demande Rust 1.85 minimum (edition 2024). La fonctionnalité par défaut « parallel » utilise rayon, déjà présent ci-dessus.
+heic-rs = "0.1.4"

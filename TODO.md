@@ -18,7 +18,7 @@
 ## 💡 Ideas / Longer term / On hold
 
 - [ ] *feat*: `UI`add selection panel close button, to close panel and deselect all pictures
-- [ ] *feat*: allow **stopping a running scan**
+- [x] *feat*: allow **stopping a running scan**
 - [x] *style*: `UI` make **filters more compact**
 - [x] *feat*: `UI` **click on a keyword to search** that keyword, ctrl modifier to add it to the searched keywords
 - [x] *feat*: `UI` **shortcuts** for left panel, info panel
@@ -42,7 +42,7 @@
 
 ## ⚖️ Undecided
 
-- [ ] *feat*: **heic / heif** image format support
+- [x] *feat*: **heic / heif** image format support
 - [ ] *feat*: [HARD] **Face recognition** (heavy & unlikely)
 - [ ] *feat*: jpeg **integrity scan** (specific view)
 - [ ] *feat*: `needs_internet` **Map screen**

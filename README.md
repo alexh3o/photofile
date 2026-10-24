@@ -44,7 +44,7 @@ The [todo](TODO.md) list can give you an idea of the path aheadl.
 - ✅ **Seamless Large-Scale Selection**: Effortlessly select multiple and non-contiguous photo groups (`Ctrl` / `Shift` + click), in any navigation direction.
 - **Fast keyboard rating**: Assign 0 to 5 stars or colors in a snap using number keys (`0`–`5`), in the grid or in fullscreen.
 - ⚖️ **Side-by-side comparison**: Compare up to 4 photos at once (with synchronized or unlinked zoom/pan) and delete rejected shots one by one.
-- 🔁 **Interoperability, leave anytime**: Ratings and color flags are written directly into standard JPEG XMP (APP1) segments or companion `.xmp` sidecars for RAWs. Your changes are immediately recognized by digiKam, Lightroom, and the Windows Explorer.
+- 🔁 **Interoperability, leave anytime**: Ratings and color flags are written directly into standard JPEG XMP (APP1) segments or companion `.xmp` sidecars for RAWs and files not supporting extra embedded metadata. Your changes are immediately recognized by digiKam, Lightroom, and the Windows Explorer.
 - ➜] **"Open with"**: Quick right-click handoff to launch your favorite external photo softwares (gimp, flyphoto, etc.) with the selected photo.
 - 💨 **Fast RAW previews (with a trade-off)**: Instead of slow, CPU-heavy demosaicing, it extracts the JPEG preview embedded inside the RAW file in milliseconds. It can be low resolution, but it makes browsing instant.
 - 🛠️ **Comprehensive Toolkit**: Batch resizing, moving & copying, EXIF data viewer, customizable thumbnail grid (size, sorting, layout), clipboard support, and system trash integration...
@@ -110,7 +110,7 @@ La [todo](TODO.md) list peut donner une idée de la direction que peut prendre l
 - **Notation rapide au clavier** : Touches `0` à `5` pour noter instantanément, en grille comme en plein écran.
 - ✅ **Sélection fluide à grande échelle** : Gestion de sélections multiples et discontinues (`Ctrl` / `Shift` + clics), sans contrainte de sens de navigation.
 - ⚖️ **Mode comparaison** : Jusqu'à 4 photos côte-à-côte avec zoom synchronisé ou indépendant, pour éliminer les moins bonnes au fur et à mesure.
-- 🔁 **Interopérabilité, pas d'enfermement** : Les notes et drapeaux de couleur sont écrits dans les fichiers (XMP APP1 pour le JPEG, fichiers compagnons `.xmp` pour les RAW). digiKam, Lightroom et l'Explorateur Windows retrouvent directement vos classements.
+- 🔁 **Interopérabilité, pas d'enfermement** : Les notes et drapeaux de couleur sont écrits dans les fichiers (XMP APP1 pour le JPEG, fichiers compagnons `.xmp` pour les RAW et autres fichiers ne supportant pas d'ajout de métadonnées intégrées). digiKam, Lightroom et l'Explorateur Windows retrouvent directement vos classements.
 - ➜] **« Ouvrir avec »** : Raccourcis au clic droit pour ouvrir rapidement une photo dans vos autres logiciels photo préférés (gimp, flyphoto, etc.).
 - 💨 **Extraction RAW ultra-rapide (avec sa contrepartie)** : L'affichage utilise le JPEG intégré au fichier RAW par le boîtier photo. La résolution peut être limitée mais c'est quasi instantané car cela évite un dématriçage lourd: aucun ralentissement.
 - 🛠️ **Boîte à outils complète** : Redimensionnement, copie, déplacements par lot, données EXIF, grille de miniatures sur-mesure (taille, tri, disposition), presse-papier et corbeille...

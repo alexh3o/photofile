@@ -87,6 +87,11 @@ fn read_embedded_jpeg_xmp(path: &Path) -> Option<String> {
     std::str::from_utf8(&data[packet_start..segment_end]).ok().map(str::to_string)
 }
 
+/// Paquet XMP intégré au fichier : segment APP1 d'un JPEG, ou item XMP d'un HEIC / HEIF.
+fn read_embedded_xmp(path: &Path) -> Option<String> {
+    if crate::heif::is_heif_path(path) { crate::heif::read_xmp(path) } else { read_embedded_jpeg_xmp(path) }
+}
+
 fn read_iptc_fields(path: &Path) -> (Vec<String>, String) {
     let Ok(file) = fs::File::open(path) else { return (Vec::new(), String::new()); };
     let mut bytes = Vec::new();
@@ -163,7 +168,7 @@ fn parse_xmp(path: &Path) -> (i32, String, String) {
     let mut color_flag: Option<String> = None;
     let mut keywords = Vec::new();
     // The image itself is the source of truth when it contains an XMP packet.
-    if let Some(embedded) = read_embedded_jpeg_xmp(path) {
+    if let Some(embedded) = read_embedded_xmp(path) {
         let (found_rating, found_color, found_keywords) = parse_xmp_text(&embedded);
         rating = found_rating;
         color_flag = found_color;
@@ -246,6 +251,7 @@ fn xml_unescape(text: &str) -> String {
 /// Lit les dimensions réelles dans l'en-tête du fichier (JPEG : marqueur SOF, PNG : IHDR).
 /// Sert de secours quand les tags EXIF PixelXDimension/PixelYDimension sont absents.
 fn read_image_dimensions(path: &Path) -> Option<(i32, i32)> {
+    if crate::heif::is_heif_path(path) { return crate::heif::read_dimensions(path); }
     let mut data = Vec::new();
     fs::File::open(path).ok()?.take(4 * 1024 * 1024).read_to_end(&mut data).ok()?;
     if data.len() >= 24 && data[0..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
@@ -331,6 +337,13 @@ pub fn read_exif(path: &Path) -> ExifMetadata {
         }
         if let Some(field) = exif.get_field(Tag::PixelYDimension, In::PRIMARY) {
             if let Some(value) = field.value.get_uint(0) { meta.height = value as i32; }
+        }
+    }
+    if crate::heif::is_heif_path(path) {
+        // Dimensions affichées (rotation du conteneur appliquée) : celles de l'EXIF sont celles du capteur.
+        if let Some((width, height)) = crate::heif::read_dimensions(path) {
+            meta.width = width;
+            meta.height = height;
         }
     }
     if meta.width <= 0 || meta.height <= 0 {
@@ -613,10 +626,17 @@ fn update_xmp_metadata(xml: &str, rating: Option<i32>, label: Option<Option<&str
 
 /// Writes xmp:Rating and/or xmp:Label into JPEG APP1 XMP, preserving the rest of the JPEG and its metadata.
 /// Only the provided values are modified (see `update_xmp_metadata`).
+/// HEIC / HEIF : le paquet XMP du fichier est modifié (ou créé) dans le conteneur, voir heif.rs ; sidecar seulement si la structure du fichier ne le permet pas.
 /// Other image formats continue to use a sidecar because they have different container layouts.
 pub fn write_xmp_metadata(image_path: &str, rating: Option<i32>, label: Option<Option<&str>>) -> std::io::Result<()> {
     let path = Path::new(image_path);
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if matches!(extension.as_str(), "heic" | "heif" | "hif") {
+        return match crate::heif::update_xmp(path, &|xml| update_xmp_metadata(xml, rating, label))? {
+            crate::heif::Outcome::Written | crate::heif::Outcome::Unchanged => Ok(()),
+            crate::heif::Outcome::Unsupported(_) => write_xmp_sidecar(path, rating, label),
+        };
+    }
     if extension != "jpg" && extension != "jpeg" {
         return write_xmp_sidecar(path, rating, label);
     }
@@ -734,7 +754,7 @@ fn read_exif_entries(path: &Path) -> Vec<MetadataEntry> {
 
 /// Paquet XMP du fichier : celui intégré au JPEG, sinon le sidecar (`photo.jpg.xmp` ou `photo.xmp`).
 fn read_xmp_packet(path: &Path) -> Option<String> {
-    if let Some(embedded) = read_embedded_jpeg_xmp(path) { return Some(embedded); }
+    if let Some(embedded) = read_embedded_xmp(path) { return Some(embedded); }
     let appended = std::path::PathBuf::from(format!("{}.xmp", path.display()));
     let compatible = path.with_extension("xmp");
     [appended, compatible].into_iter().find_map(|sidecar| fs::read_to_string(sidecar).ok())

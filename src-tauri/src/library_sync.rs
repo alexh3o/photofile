@@ -65,6 +65,8 @@ pub fn store_modified(conn: &rusqlite::Connection, items: &[(String, i64)]) {
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     // Formats standards
     "jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "jfif",
+    // HEIC / HEIF (décodage et métadonnées : heif.rs)
+    "heic", "heif", "hif",
     // Formats RAW
     "arw", "cr2", "cr3", "nef", "nrw", "dng", "raf", "orf", "rw2", "raw",
     // Tried and removed:

@@ -165,10 +165,17 @@ function isRawPath(path) {
   return RAW_EXTENSIONS.has(ext);
 }
 
+// HEIC / HEIF : le webview ne sait pas les afficher. Le backend en fait un JPEG pleine résolution (même commande et même cache que l'aperçu RAW).
+const HEIF_EXTENSIONS = new Set(['heic', 'heif', 'hif']);
+function needsGeneratedPreview(path) {
+  const ext = (path || '').split('.').pop()?.toLowerCase();
+  return RAW_EXTENSIONS.has(ext) || HEIF_EXTENSIONS.has(ext);
+}
+
 const rawPreviewPromises = new Map();
 async function getPhotoDisplayUrl(photo) {
   if (!photo) return '';
-  if (!isRawPath(photo.path)) {
+  if (!needsGeneratedPreview(photo.path)) {
     return photoUrl(photo);
   }
   let promise = rawPreviewPromises.get(photo.path);
