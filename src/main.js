@@ -1890,6 +1890,7 @@ function renderSettingsFolderList() {
       <button class="btn-remove-folder">${t('Remove')}</button>
     `;
     li.querySelector('.btn-remove-folder').addEventListener('click', async () => {
+      dropScanTasksForFolder(f.path); // un dossier retiré ne doit plus être scanné
       folders = await invoke('remove_folder', { id: f.id, path: f.path });
       if (currentFolderFilter === f.path) currentFolderFilter = null;
       renderFolderTree();
@@ -1998,20 +1999,18 @@ window.addEventListener('keydown', event => {
 document.getElementById('btn-add-folder').addEventListener('click', async () => {
   const dir = await open({ directory: true });
   if (dir) {
-    currentScanningFolderName = dir.split(/[\\/]/).filter(Boolean).pop() || dir;
-    folderScanRunning = true;
-    showTaskToast(t('Scanning folder {folder}…', { folder: currentScanningFolderName }), 0);
 
+    // Le dossier est ajouté tout de suite à la liste (arborescence et Paramètres) ; son scan passe par la file d'attente des tâches.
     try {
-      folders = await invoke('add_folder_and_scan', { path: dir });
+      folders = await invoke('add_folder', { path: dir });
       renderFolderTree();
       renderSettingsFolderList();
     } catch (error) {
-      folderScanRunning = false;
-      hideTaskToast();
       console.error('Ajout de dossier impossible', error);
       showWriteToast(t('Unable to read metadata: {error}', { error }));
+      return;
     }
+    enqueueScanTask({ kind: 'add', path: dir, command: 'scan_folder', args: { path: dir }, labelKey: 'Scanning folder {folder}…', labelParams: { folder: folderBaseName(dir) } });
   }
 });
 
@@ -2577,41 +2576,185 @@ document.getElementById('recursive-folder-toggle').addEventListener('change', ev
 document.querySelectorAll('#selection-rating-stars button').forEach(button => {
   button.addEventListener('click', () => setSelectionRating(Number(button.dataset.rating)));
 });
-// Rescan : relit les métadonnées des fichiers de toute la collection, ou d'un seul dossier (menu contextuel de l'arborescence). Un toast affiche
-// le nom de la tâche et son avancement approximatif (événements « rescan-progress » du backend, en pourcentage) ; il disparaît quand la tâche est terminée.
-let rescanRunning = false;
-let rescanPercent = 0;
-let rescanTaskName = '';
-const taskToast = document.getElementById('task-toast');
+// ==========================================
+// FILE D'ATTENTE DES TÂCHES (scan d'un dossier ajouté, relecture de la collection ou d'un dossier)
+// ==========================================
+// Une seule tâche de scan s'exécute à la fois, les autres attendent leur tour dans l'ordre de leur demande. Chaque tâche a son toast (la tâche en cours en bas,
+// avec son avancement ; les suivantes au-dessus, « En attente ») et sa ligne dans la fenêtre « Actions en cours » (bouton sablier de la barre du haut), qui permet
+// d'arrêter la tâche en cours ou de retirer une tâche en attente. Le backend publie l'avancement dans « scan-progress » avec l'identifiant de la tâche.
+// { id, kind: 'add' | 'rescan-all' | 'rescan-folder', path (null = toute la collection), command, args, labelKey, labelParams,
+//   status: 'waiting' | 'running', percent, stopRequested, toastHidden }
+const scanTasks = [];
+let scanTaskCounter = 0;
+let scanPumpActive = false;
+let transientToast = null; // toast d'une opération courte qui n'est pas un scan (déplacement des données, cache des miniatures) : showTaskToast / hideTaskToast
+const taskToastsContainer = document.getElementById('task-toasts');
+const tasksButton = document.getElementById('btn-open-tasks');
+const tasksModal = document.getElementById('tasks-modal');
+const tasksList = document.getElementById('tasks-list');
+const taskToastElements = new Map(); // tâche -> son toast
+const taskRowElements = new Map(); // tâche -> sa ligne dans la fenêtre des actions
 
+const folderBaseName = path => path.split(/[\\/]/).filter(Boolean).pop() || path;
+const normalizeTaskPath = path => path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const taskName = task => task.displayName ?? t(task.labelKey, task.labelParams);
+const taskPercent = task => Math.max(0, Math.min(100, Math.round(task.percent)));
+
+function taskStatusText(task) {
+  if (task.status === 'waiting') return t('Waiting');
+  if (task.stopRequested) return t('Stopping…');
+  return `${taskPercent(task)} %`;
+}
+
+// Une tâche couvre un dossier quand c'est le sien, l'un de ses sous-dossiers, ou que la tâche relit toute la collection.
+function taskCoversFolder(task, path) {
+  if (task.path === null) return true;
+  const root = normalizeTaskPath(task.path);
+  const folder = normalizeTaskPath(path);
+  return folder === root || folder.startsWith(`${root}/`);
+}
+
+// Place les éléments dans l'ordre voulu sans toucher à ceux qui y sont déjà (un bouton déplacé pendant un clic perdrait ce clic).
+function syncChildren(container, wanted) {
+  for (const child of [...container.children]) if (!wanted.includes(child)) child.remove();
+  wanted.forEach((element, position) => {
+    if (container.children[position] !== element) container.insertBefore(element, container.children[position] || null);
+  });
+}
+
+function buildTaskToast(task) {
+  const toast = document.createElement('div');
+  toast.className = 'task-toast';
+  toast.setAttribute('role', 'status');
+  const text = document.createElement('span');
+  text.className = 'task-toast-text';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'task-toast-close';
+  close.textContent = '×';
+  close.addEventListener('click', () => {
+    task.toastHidden = true; // le toast se ferme, la tâche continue (elle reste dans la fenêtre des actions)
+    syncTaskUI();
+  });
+  toast.append(text, close);
+  return toast;
+}
+
+function buildTaskRow(task) {
+  const row = document.createElement('li');
+  row.className = 'task-item';
+  const name = document.createElement('span');
+  name.className = 'task-item-name';
+  const status = document.createElement('span');
+  status.className = 'task-item-status';
+  const bar = document.createElement('div');
+  bar.className = 'task-item-bar';
+  bar.append(document.createElement('span'));
+  const action = document.createElement('button');
+  action.type = 'button';
+  action.className = 'task-item-action';
+  action.addEventListener('click', () => removeOrStopTask(task));
+  row.append(name, status, bar, action);
+  return row;
+}
+
+// Met l'affichage en phase avec les tâches : toasts, lignes de la fenêtre des actions et bouton sablier.
+function syncTaskUI() {
+  const toastTasks = [...scanTasks, ...(transientToast ? [transientToast] : [])].filter(task => !task.toastHidden);
+  const toasts = toastTasks.map(task => {
+    let toast = taskToastElements.get(task);
+    if (!toast) {
+      toast = buildTaskToast(task);
+      taskToastElements.set(task, toast);
+    }
+    toast.classList.toggle('waiting', task.status === 'waiting');
+    toast.querySelector('.task-toast-text').textContent = `${taskName(task)} · ${taskStatusText(task)}`;
+    const close = toast.querySelector('.task-toast-close');
+    close.title = t('Close');
+    close.setAttribute('aria-label', t('Close'));
+    return toast;
+  });
+  for (const [task, toast] of taskToastElements) {
+    if (!toastTasks.includes(task)) {
+      toast.remove();
+      taskToastElements.delete(task);
+    }
+  }
+  syncChildren(taskToastsContainer, toasts);
+
+  const rows = scanTasks.map(task => {
+    let row = taskRowElements.get(task);
+    if (!row) {
+      row = buildTaskRow(task);
+      taskRowElements.set(task, row);
+    }
+    row.classList.toggle('waiting', task.status === 'waiting');
+    const name = row.querySelector('.task-item-name');
+    name.textContent = taskName(task);
+    name.title = taskName(task);
+    row.querySelector('.task-item-status').textContent = taskStatusText(task);
+    row.querySelector('.task-item-bar > span').style.width = `${task.status === 'waiting' ? 0 : taskPercent(task)}%`;
+    const action = row.querySelector('.task-item-action');
+    action.textContent = task.status === 'waiting' ? t('Remove from queue') : t('Stop');
+    action.disabled = task.stopRequested;
+    return row;
+  });
+  for (const [task, row] of taskRowElements) {
+    if (!scanTasks.includes(task)) {
+      row.remove();
+      taskRowElements.delete(task);
+    }
+  }
+  syncChildren(tasksList, rows);
+
+  const label = `${t('Running tasks')} (${scanTasks.length})`;
+  tasksButton.hidden = scanTasks.length === 0;
+  tasksButton.title = label;
+  tasksButton.setAttribute('aria-label', label);
+}
+onLanguageChange(syncTaskUI);
+
+// Toast d'une opération courte hors scan (déplacement des données, vidage du cache) : un seul à la fois, affiché avec son pourcentage.
 function showTaskToast(name, percent) {
-  taskToast.textContent = `${name} · ${Math.max(0, Math.min(100, Math.round(percent)))} %`;
-  taskToast.classList.remove('hidden');
+  if (transientToast) {
+    transientToast.displayName = name;
+    transientToast.percent = percent;
+  } else {
+    transientToast = { displayName: name, percent, status: 'running', stopRequested: false, toastHidden: false };
+  }
+  syncTaskUI();
 }
 
 function hideTaskToast() {
-  taskToast.classList.add('hidden');
+  transientToast = null;
+  syncTaskUI();
 }
 
-let folderScanRunning = false;
-let currentScanningFolderName = '';
-listenToBackend('folder-scan-progress', event => {
-  if (!folderScanRunning) return;
-  const percent = Number(event.payload) || 0;
-  showTaskToast(t('Scanning folder {folder}…', { folder: currentScanningFolderName }), percent);
-}).catch(error => console.debug('Suivi du scan de dossier indisponible', error));
-listenToBackend('scan-complete', () => {
-  if (folderScanRunning) {
-    folderScanRunning = false;
-    hideTaskToast();
-    loadPhotos(); // recharge automatiquement les photos dès que le scan s'achève
-  }
-}).catch(error => console.debug('Suivi de fin de scan indisponible', error));
+function openTasksModal() {
+  syncTaskUI();
+  tasksModal.classList.remove('hidden');
+}
+function closeTasksModal() {
+  tasksModal.classList.add('hidden');
+}
+tasksButton.addEventListener('click', openTasksModal);
+document.getElementById('btn-close-tasks').addEventListener('click', closeTasksModal);
+tasksModal.addEventListener('click', event => {
+  if (event.target === tasksModal) closeTasksModal();
+});
+window.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || tasksModal.classList.contains('hidden')) return;
+  event.preventDefault();
+  closeTasksModal();
+});
 
-listenToBackend('rescan-progress', event => {
-  if (!rescanRunning) return;
-  rescanPercent = Math.max(rescanPercent, Number(event.payload) || 0); // jamais de recul si deux événements arrivent dans le désordre
-  showTaskToast(rescanTaskName, rescanPercent);
+// Avancement des tâches de scan (pourcentage de la tâche, jamais en recul si deux événements arrivent dans le désordre).
+listenToBackend('scan-progress', event => {
+  const { taskId, percent } = event.payload || {};
+  const task = scanTasks.find(item => item.id === taskId);
+  if (!task || task.status !== 'running') return;
+  task.percent = Math.max(task.percent, Number(percent) || 0);
+  syncTaskUI();
 }).catch(error => console.debug('Suivi de la progression indisponible', error));
 
 // Recharge les photos après un rescan. L'arborescence est construite depuis la liste complète de la collection : quand un dossier est
@@ -2623,32 +2766,85 @@ async function reloadPhotosAfterRescan() {
   await loadPhotos();
 }
 
-// Un seul rescan (ou scan de dossier ajouté) à la fois : ils partagent le toast de progression et l'événement de fin de scan.
-async function runRescan(taskName, command, args = {}) {
-  if (rescanRunning || folderScanRunning) return;
-  rescanRunning = true;
-  rescanPercent = 0;
-  rescanTaskName = taskName;
-  showTaskToast(taskName, 0);
+// Retire une tâche en attente de la file, ou demande l'arrêt de la tâche en cours (les photos déjà lues restent dans le catalogue ;
+// les fichiers non lus d'un dossier sont repris par la synchronisation avec le disque, ou par une nouvelle relecture).
+function removeOrStopTask(task) {
+  if (task.status === 'waiting') {
+    const position = scanTasks.indexOf(task);
+    if (position >= 0) scanTasks.splice(position, 1);
+    syncTaskUI();
+  } else if (!task.stopRequested) {
+    task.stopRequested = true;
+    syncTaskUI();
+    invoke('cancel_scan', { taskId: task.id }).catch(error => console.debug('Arrêt du scan impossible', error));
+  }
+}
+
+// Un dossier retiré de la liste des dossiers suivis ne doit plus être scanné : ses tâches en attente sont retirées, celle en cours est arrêtée.
+function dropScanTasksForFolder(path) {
+  for (const task of [...scanTasks]) {
+    if (task.path !== null && taskCoversFolder({ path }, task.path)) removeOrStopTask(task);
+  }
+}
+
+// Met une tâche en file d'attente ; elle démarre tout de suite si rien ne tourne. Elle est refusée, avec un message, quand une tâche en cours ou en attente
+// couvre déjà ce dossier (même dossier, dossier parent, ou relecture de toute la collection). Renvoie true si la tâche est en file.
+function enqueueScanTask({ kind, path, command, args, labelKey, labelParams }) {
+  const covering = path === null
+    ? scanTasks.find(task => task.path === null && !task.stopRequested)
+    : scanTasks.find(task => !task.stopRequested && taskCoversFolder(task, path));
+  if (covering) {
+    showWriteToast(t('Already part of a scan in progress or waiting: {name}', { name: taskName(covering) }));
+    return false;
+  }
+  scanTaskCounter += 1;
+  scanTasks.push({
+    id: `scan-${Date.now()}-${scanTaskCounter}`,
+    kind, path, command, args, labelKey, labelParams,
+    status: 'waiting', percent: 0, stopRequested: false, toastHidden: false,
+  });
+  syncTaskUI();
+  pumpScanQueue();
+  return true;
+}
+
+// Exécute les tâches une par une, dans l'ordre de la file.
+async function pumpScanQueue() {
+  if (scanPumpActive) return;
+  scanPumpActive = true;
   try {
-    await invoke(command, args);
-    showTaskToast(taskName, 100);
+    for (let task = scanTasks.find(item => item.status === 'waiting'); task; task = scanTasks.find(item => item.status === 'waiting')) {
+      await runScanTask(task);
+    }
+  } finally {
+    scanPumpActive = false;
+  }
+}
+
+async function runScanTask(task) {
+  task.status = 'running';
+  syncTaskUI();
+  try {
+    await invoke(task.command, { ...task.args, taskId: task.id });
+    task.percent = 100;
+    syncTaskUI();
     await reloadPhotosAfterRescan();
+    if (task.stopRequested) showWriteToast(t('Task stopped: {name}', { name: taskName(task) }));
   } catch (error) {
     console.error('Rescan impossible', error);
     showWriteToast(t('Rescan failed: {error}', { error }));
   } finally {
-    rescanRunning = false;
-    hideTaskToast();
+    const position = scanTasks.indexOf(task);
+    if (position >= 0) scanTasks.splice(position, 1);
+    syncTaskUI();
   }
 }
 
-document.getElementById('btn-rescan-folders').addEventListener('click', () => runRescan(t('Collection data rescan'), 'rescan_all_folders'));
+document.getElementById('btn-rescan-folders').addEventListener('click', () => enqueueScanTask({ kind: 'rescan-all', path: null, command: 'rescan_all_folders', args: {}, labelKey: 'Collection data rescan', labelParams: undefined }));
 
 // Rescan d'un dossier de l'arborescence (sous-dossiers compris), lancé depuis son menu contextuel.
 function rescanFolder(path) {
-  const name = path.split(/[\\/]/).filter(Boolean).pop() || path;
-  return runRescan(t('Folder data rescan: {folder}', { folder: name }), 'rescan_folder', { path });
+  return enqueueScanTask({ kind: 'rescan-folder', path, command: 'rescan_folder', args: { path }, labelKey: 'Folder data rescan: {folder}', labelParams: { folder: folderBaseName(path) } });
 }
 
 // ==========================================
@@ -3774,7 +3970,7 @@ let librarySyncRunning = false;
 let librarySyncNotBefore = 0;
 
 async function syncLibraryWithDisk() {
-  if (librarySyncRunning || rescanRunning || photoMoveRunning || Date.now() < librarySyncNotBefore) return;
+  if (librarySyncRunning || scanTasks.length > 0 || photoMoveRunning || Date.now() < librarySyncNotBefore) return;
   librarySyncRunning = true;
   const startedAt = Date.now();
   try {

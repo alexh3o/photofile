@@ -27,6 +27,7 @@
       </div>
       <div class="actions">
         <button id="btn-open-settings" title="Paramètres" aria-label="Paramètres" data-i18n-title="Settings" data-i18n-aria-label="Settings"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-settings preview-icon"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg></button>
+        <button id="btn-open-tasks" type="button" hidden title="Actions en cours" aria-label="Actions en cours" aria-haspopup="dialog" data-i18n-title="Running tasks" data-i18n-aria-label="Running tasks"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-hourglass preview-icon"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></svg></button>
         <button id="btn-open-sort" type="button" aria-haspopup="dialog"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-up-down preview-icon"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg></button>
       </div>
       <div class="panel-toggles">
@@ -356,8 +357,21 @@
         </div>
       </div>
     </div>
+    <!-- Modale des actions en cours : scans et relectures de dossiers, en cours ou en attente (voir « FILE D'ATTENTE DES TÂCHES » dans main.js) -->
+    <div id="tasks-modal" class="modal hidden">
+      <div class="modal-card tasks-card" role="dialog" aria-modal="true" aria-labelledby="tasks-modal-title">
+        <div class="modal-header">
+          <h3 id="tasks-modal-title" data-i18n="Running tasks">Actions en cours</h3>
+          <button id="btn-close-tasks" class="close-x" title="Fermer" aria-label="Fermer" data-i18n-title="Close" data-i18n-aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <ul id="tasks-list" class="tasks-list"></ul>
+          <p id="tasks-empty" class="tasks-empty" data-i18n="No task in progress">Aucune action en cours.</p>
+        </div>
+      </div>
+    </div>
     <div id="write-toast" class="write-toast hidden" role="status" aria-live="polite"></div>
-    <div id="task-toast" class="write-toast task-toast hidden" role="status" aria-live="polite"></div>
+    <div id="task-toasts" class="task-toasts" aria-live="polite"></div>
     <div id="guide-modal" class="modal hidden">
       <div class="modal-card guide-card">
         <div class="modal-header">

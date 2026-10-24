@@ -9,7 +9,9 @@ mod thumbnails;
 use tauri::{State, Emitter, Manager};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 use rayon::prelude::*;
@@ -429,17 +431,12 @@ fn get_folders(state: State<'_, AppState>) -> Vec<TrackedFolder> {
 }
 
 #[tauri::command]
-async fn add_folder_and_scan(app: tauri::AppHandle, state: State<'_, AppState>, path: String) -> Result<Vec<TrackedFolder>, String> {
+// Ajoute le dossier à la liste des dossiers suivis, sans le scanner : l'interface met le scan en file d'attente (commande `scan_folder`),
+// pour que plusieurs scans ne tournent jamais en même temps.
+async fn add_folder(state: State<'_, AppState>, path: String) -> Result<Vec<TrackedFolder>, String> {
     let pool = state.pool();
     db::add_folder(&pool, &path)?;
     let folders = db::get_folders(&pool);
-
-    let scan_pool = pool.clone();
-    let scan_path = path.clone();
-    tokio::spawn(async move {
-        run_scan(app, scan_pool, scan_path, ScanMode::FolderScan).await;
-    });
-
     Ok(folders)
 }
 
@@ -456,8 +453,41 @@ enum ScanMode {
     FolderScan,
 }
 
-// `scan_mode` : mode de publication d'avancement (rescan global ou découverte d'un dossier)
-async fn run_scan(app: tauri::AppHandle, pool: DbPool, scan_path: String, scan_mode: ScanMode) {
+// Progression d'une tâche de scan, publiée dans l'événement « scan-progress » : l'interface retrouve sa tâche grâce à `taskId`
+// (identifiant qu'elle a donné à la commande), ce qui évite de confondre les noms et les pourcentages de deux tâches.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgress {
+    task_id: String,
+    percent: u32,
+}
+
+// Drapeaux d'annulation des scans, par identifiant de tâche. Le drapeau est créé par le premier qui le demande (le scan ou la demande d'arrêt),
+// donc un arrêt demandé juste au démarrage d'un scan n'est pas perdu. Le scan le retire à sa fin.
+fn scan_cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn scan_cancel_flag(task_id: &str) -> Arc<AtomicBool> {
+    let mut flags = scan_cancel_flags().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    flags.entry(task_id.to_string()).or_insert_with(|| Arc::new(AtomicBool::new(false))).clone()
+}
+
+fn release_scan_cancel_flag(task_id: &str) {
+    scan_cancel_flags().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(task_id);
+}
+
+// Arrête un scan ou une relecture en cours : le parcours cesse et les photos déjà lues restent dans le catalogue.
+// Les fichiers non lus seront repris par la synchronisation incrémentale (sync_library) ou par une nouvelle relecture.
+#[tauri::command]
+fn cancel_scan(task_id: String) {
+    scan_cancel_flag(&task_id).store(true, Ordering::SeqCst);
+}
+
+// `scan_mode` : mode de calcul de l'avancement (relecture, éventuellement d'une partie des dossiers suivis, ou découverte d'un dossier)
+// `task_id` / `cancel` : identifiant de la tâche pour les événements de progression, et drapeau d'arrêt demandé par l'interface
+async fn run_scan(app: tauri::AppHandle, pool: DbPool, scan_path: String, scan_mode: ScanMode, task_id: String, cancel: Arc<AtomicBool>) {
     // Chaque photo arrive avec la date de modification de son fichier, enregistrée en base avec les métadonnées
     // pour que la synchronisation automatique ne la relise pas inutilement.
     let (tx, mut rx) = mpsc::channel::<(Photo, i64)>(100);
@@ -494,8 +524,17 @@ async fn run_scan(app: tauri::AppHandle, pool: DbPool, scan_path: String, scan_m
         //        p.ends_with(".jpg") || p.ends_with(".jpeg") || p.ends_with(".png") || p.ends_with(".raw")
         //    })
         //    .collect();
+        // Progression : `fraction` (0 à 1) est celle du dossier ; pour une relecture de plusieurs dossiers, elle est ramenée à l'ensemble.
+        let publish = |fraction: f64| {
+            let percent = match scan_mode {
+                ScanMode::Rescan { index, count } => (index as f64 + fraction) / count.max(1) as f64 * 100.0,
+                ScanMode::FolderScan => fraction * 100.0,
+            };
+            let _ = progress_app.emit("scan-progress", ScanProgress { task_id: task_id.clone(), percent: percent.round() as u32 });
+        };
         let entries: Vec<_> = WalkDir::new(scan_path)
             .into_iter()
+            .take_while(|_| !cancel.load(Ordering::Relaxed))
             .filter_map(|e| e.ok())
             .filter(|e| !e.file_type().is_dir() && library_sync::is_photo_file(e.path()))
             .collect();
@@ -505,26 +544,16 @@ async fn run_scan(app: tauri::AppHandle, pool: DbPool, scan_path: String, scan_m
         let done = AtomicUsize::new(0);
 
         if entries.is_empty() {
-            if let ScanMode::FolderScan = scan_mode {
-                let _ = progress_app.emit("folder-scan-progress", 100u32);
-            }
+            publish(1.0);
         }
 
         entries.par_iter().for_each(|entry| {
-            // Progression (rescan complet seulement) : un événement environ tous les 1 % du dossier, ramené à l'ensemble
-            // des dossiers suivis. Valeur approximative : l'ordre d'arrivée entre threads n'est pas garanti.
+            // Arrêt demandé : les fichiers restants ne sont pas lus (ceux déjà lus sont enregistrés normalement).
+            if cancel.load(Ordering::Relaxed) { return; }
+            // Progression : un événement environ tous les 1 % du dossier. Valeur approximative : l'ordre d'arrivée entre threads n'est pas garanti.
             let finished = done.fetch_add(1, Ordering::Relaxed) + 1;
             if finished % step == 0 || finished == total {
-                match scan_mode {
-                    ScanMode::Rescan { index, count } => {
-                        let percent = (index as f64 + finished as f64 / total as f64) / count.max(1) as f64 * 100.0;
-                        let _ = progress_app.emit("rescan-progress", percent.round() as u32);
-                    }
-                    ScanMode::FolderScan => {
-                        let percent = (finished as f64 / total as f64) * 100.0;
-                        let _ = progress_app.emit("folder-scan-progress", percent.round() as u32);
-                    }
-                }
+                publish(finished as f64 / total as f64);
             }
             let path_str = entry.path().to_string_lossy().to_string();
             let Ok(metadata) = entry.metadata() else { return; };
@@ -560,17 +589,30 @@ async fn run_scan(app: tauri::AppHandle, pool: DbPool, scan_path: String, scan_m
     });
     let _ = scanner.await;
     let _ = writer.await;
-    let _ = app.emit("scan-complete", ());
+}
+
+// Découverte d'un dossier qui vient d'être ajouté (voir add_folder) : lit les métadonnées de ses photos et rend la main quand c'est terminé.
+// La progression est publiée par « scan-progress » (0 à 100 % du dossier) avec l'identifiant de la tâche.
+#[tauri::command]
+async fn scan_folder(app: tauri::AppHandle, state: State<'_, AppState>, path: String, task_id: String) -> Result<(), String> {
+    let pool = state.pool();
+    let cancel = scan_cancel_flag(&task_id);
+    run_scan(app, pool, path, ScanMode::FolderScan, task_id.clone(), cancel).await;
+    release_scan_cancel_flag(&task_id);
+    Ok(())
 }
 
 #[tauri::command]
-async fn rescan_all_folders(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn rescan_all_folders(app: tauri::AppHandle, state: State<'_, AppState>, task_id: String) -> Result<(), String> {
     let pool = state.pool();
     let folders = db::get_folders(&pool);
     let count = folders.len();
+    let cancel = scan_cancel_flag(&task_id);
     for (index, folder) in folders.into_iter().enumerate() {
-        run_scan(app.clone(), pool.clone(), folder.path, ScanMode::Rescan { index, count }).await;
+        if cancel.load(Ordering::Relaxed) { break; }
+        run_scan(app.clone(), pool.clone(), folder.path, ScanMode::Rescan { index, count }, task_id.clone(), cancel.clone()).await;
     }
+    release_scan_cancel_flag(&task_id);
     Ok(())
 }
 
@@ -596,13 +638,15 @@ fn resolve_tracked_folder(pool: &DbPool, requested: &str) -> Option<PathBuf> {
 }
 
 // Rescan d'un seul dossier suivi ou d'un de ses sous-dossiers (sous-dossiers compris), comme le rescan complet : les métadonnées de chaque
-// fichier sont relues. La progression est publiée par les mêmes événements « rescan-progress » (0 à 100 % du dossier).
+// fichier sont relues. La progression est publiée par l'événement « scan-progress » (0 à 100 % du dossier) avec l'identifiant de la tâche.
 #[tauri::command]
-async fn rescan_folder(app: tauri::AppHandle, state: State<'_, AppState>, path: String) -> Result<(), String> {
+async fn rescan_folder(app: tauri::AppHandle, state: State<'_, AppState>, path: String, task_id: String) -> Result<(), String> {
     let pool = state.pool();
     let scan_path = resolve_tracked_folder(&pool, &path).ok_or_else(|| format!("Dossier non suivi : {path}"))?;
     if !scan_path.is_dir() { return Err(format!("Dossier introuvable : {path}")); }
-    run_scan(app, pool.clone(), scan_path.to_string_lossy().into_owned(), ScanMode::Rescan { index: 0, count: 1 }).await;
+    let cancel = scan_cancel_flag(&task_id);
+    run_scan(app, pool.clone(), scan_path.to_string_lossy().into_owned(), ScanMode::Rescan { index: 0, count: 1 }, task_id.clone(), cancel).await;
+    release_scan_cancel_flag(&task_id);
     Ok(())
 }
 
@@ -1250,7 +1294,9 @@ fn main() {
             clear_thumbnail_cache,
             set_thumbnail_cache_size,
             get_folders,
-            add_folder_and_scan,
+            add_folder,
+            scan_folder,
+            cancel_scan,
             remove_folder,
             get_photos_paginated,
             get_cached_thumbnail_path,
